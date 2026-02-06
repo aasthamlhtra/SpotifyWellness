@@ -1,0 +1,195 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: spotify_postgres
+    environment:
+      POSTGRES_DB: spotify_insights
+      POSTGRES_USER: spotify_user
+      POSTGRES_PASSWORD: spotify_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spotify_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - spotify_network
+
+  # Redis for caching and message broker
+  redis:
+    image: redis:7-alpine
+    container_name: spotify_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - spotify_network
+
+  # FastAPI Application
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spotify_api
+    environment:
+      - DATABASE_URL=postgresql://spotify_user:spotify_pass@postgres:5432/spotify_insights
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ENVIRONMENT=development
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - spotify_network
+
+  # Celery Worker for Spotify tasks
+  celery_worker_spotify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spotify_celery_worker_spotify
+    environment:
+      - DATABASE_URL=postgresql://spotify_user:spotify_pass@postgres:5432/spotify_insights
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A celery_config worker --queues=spotify --loglevel=info --concurrency=2
+    networks:
+      - spotify_network
+
+  # Celery Worker for LLM insights
+  celery_worker_insights:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spotify_celery_worker_insights
+    environment:
+      - DATABASE_URL=postgresql://spotify_user:spotify_pass@postgres:5432/spotify_insights
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A celery_config worker --queues=insights --loglevel=info --concurrency=2
+    networks:
+      - spotify_network
+
+  # Celery Worker for scheduled tasks
+  celery_worker_scheduled:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spotify_celery_worker_scheduled
+    environment:
+      - DATABASE_URL=postgresql://spotify_user:spotify_pass@postgres:5432/spotify_insights
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A celery_config worker --queues=scheduled --loglevel=info --concurrency=1
+    networks:
+      - spotify_network
+
+  # Celery Beat for scheduled tasks
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spotify_celery_beat
+    environment:
+      - DATABASE_URL=postgresql://spotify_user:spotify_pass@postgres:5432/spotify_insights
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A celery_config beat --loglevel=info
+    networks:
+      - spotify_network
+
+  # Flower for Celery monitoring (optional)
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spotify_flower
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+    command: celery -A celery_config flower --port=5555
+    networks:
+      - spotify_network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  spotify_network:
+    driver: bridge
